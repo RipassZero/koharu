@@ -507,6 +507,7 @@
     "eraser": "Borrador",
     "increaseBrushSize": "Aumentar tamaño del pincel",
     "pan": "Desplazar",
+    "region": "Reconocer texto",
     "remove": "Eliminar",
     "select": "Seleccionar",
     "text": "Texto"

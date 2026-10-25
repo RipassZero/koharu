@@ -507,6 +507,7 @@
     "eraser": "Gomme",
     "increaseBrushSize": "Augmenter la taille du pinceau",
     "pan": "Déplacer",
+    "region": "Reconnaître le texte",
     "remove": "Retirer",
     "select": "Sélection",
     "text": "Texte"

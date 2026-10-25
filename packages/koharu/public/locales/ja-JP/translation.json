@@ -507,6 +507,7 @@
     "eraser": "消しゴム",
     "increaseBrushSize": "ブラシサイズを拡大",
     "pan": "移動",
+    "region": "テキストを認識",
     "remove": "削除",
     "select": "選択",
     "text": "テキスト"

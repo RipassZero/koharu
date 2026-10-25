@@ -507,6 +507,7 @@
     "eraser": "Eraser",
     "increaseBrushSize": "Increase brush size",
     "pan": "Pan",
+    "region": "Recognize text",
     "remove": "Remove",
     "select": "Select",
     "text": "Text"

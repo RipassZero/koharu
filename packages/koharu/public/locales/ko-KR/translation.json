@@ -507,6 +507,7 @@
     "eraser": "지우개",
     "increaseBrushSize": "브러시 크기 늘리기",
     "pan": "이동",
+    "region": "텍스트 인식",
     "remove": "제거",
     "select": "선택",
     "text": "텍스트"

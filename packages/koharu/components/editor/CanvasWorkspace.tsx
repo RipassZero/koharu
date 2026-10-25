@@ -48,6 +48,7 @@ const BRUSH_DIAMETER_STEP = 4
 const canvasCursors = {
   select: undefined,
   text: 'text',
+  region: 'crosshair',
   draw: 'none',
   eraser: 'none',
   color_picker: 'crosshair',
@@ -65,7 +66,7 @@ type Gesture =
       additive: boolean
     }
   | { kind: 'move'; pointer: number; start: Point; originals: TransformFrame[] }
-  | { kind: 'text'; pointer: number; start: Point; frame: Frame }
+  | { kind: 'text' | 'region'; pointer: number; start: Point; frame: Frame }
   | StrokeGesture
 
 interface StrokeGesture {
@@ -386,7 +387,7 @@ export function CanvasWorkspace() {
         return
       }
       const next = (
-        ['select', 'text', 'draw', 'eraser', 'color_picker', 'remove', 'pan'] as const
+        ['select', 'text', 'region', 'draw', 'eraser', 'color_picker', 'remove', 'pan'] as const
       ).find((action) => state.shortcuts[action] === event.key.toLowerCase())
       if (next) setTool(next)
     }
@@ -491,7 +492,7 @@ export function CanvasWorkspace() {
           y: point.y - current.start.y,
         }),
       )
-    } else if (current.kind === 'text') {
+    } else if (current.kind === 'text' || current.kind === 'region') {
       current.frame = draftFrame(current.start, point)
       setDraft(current.frame)
     } else if (current.kind === 'paint' || current.kind === 'erase' || current.kind === 'inpaint') {
@@ -527,6 +528,22 @@ export function CanvasWorkspace() {
       setSelectionRect(null)
     } else if (current.kind === 'move') {
       finishTransform()
+    } else if (current.kind === 'region') {
+      setDraft(null)
+      const { zoom } = useKoharuStore.getState().camera
+      // A text region needs an area to read; a click without a drag does nothing.
+      if (current.frame.width < 4 / zoom || current.frame.height < 4 / zoom) return
+      void call(commands.addTextRegion, current.frame)
+        .then(async (result) => {
+          selectLayers([result.layer])
+          await refresh(projectKey, pagesKey, pageKey)
+          return call(
+            commands.process,
+            { scope: 'entities', value: [result.layer] },
+            { operation: 'stages', stages: ['ocr', 'translation'] },
+          )
+        })
+        .catch(() => undefined)
     } else if (current.kind === 'text') {
       const { zoom } = useKoharuStore.getState().camera
       const pointText = current.frame.width < 4 / zoom && current.frame.height < 4 / zoom
@@ -656,9 +673,9 @@ export function CanvasWorkspace() {
               if (!originals.length) return
               gesture.current = { kind: 'move', pointer: event.pointerId, start: point, originals }
               beginTransform(originals)
-            } else if (tool === 'text') {
+            } else if (tool === 'text' || tool === 'region') {
               const frame = draftFrame(point, point)
-              gesture.current = { kind: 'text', pointer: event.pointerId, start: point, frame }
+              gesture.current = { kind: tool, pointer: event.pointerId, start: point, frame }
               setDraft(frame)
             } else if (tool === 'draw') {
               strokeUpdates.clear()

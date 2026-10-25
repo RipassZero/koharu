@@ -189,6 +189,33 @@ pub(crate) async fn add_text_box(
     })
 }
 
+// Adds a text region for source lettering that detection missed, ready for OCR.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn add_text_region(
+    frame: Frame,
+    desktop: State<'_, Desktop>,
+    project: State<'_, CurrentProject>,
+    canvas_channel: State<'_, CanvasChannel>,
+) -> Result<LayerCommit, Error> {
+    let (commit, page, layer) = {
+        let mut project = project.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let page = project
+            .active_page()
+            .context("the project has no active page")?;
+        let (commit, layer) = project.add_text_region(page, frame).await?;
+        project.record_commit(&commit);
+        (commit, project.active_page(), layer)
+    };
+    desktop.synchronize(&commit.snapshot, page, &commit).await?;
+    canvas_channel.channel.publish(desktop.canvas_state());
+    Ok(LayerCommit {
+        revision: commit.revision,
+        layer,
+    })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn commit_paint(

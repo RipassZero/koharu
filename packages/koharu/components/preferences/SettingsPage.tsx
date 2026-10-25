@@ -305,6 +305,7 @@ function ShortcutPreferences() {
   const actions: ShortcutAction[] = [
     'select',
     'text',
+    'region',
     'draw',
     'eraser',
     'color_picker',
@@ -342,6 +343,7 @@ function LoadingPreferences() {
 const shortcutKeys: Record<ShortcutAction, string> = {
   select: 'tools.select',
   text: 'tools.text',
+  region: 'tools.region',
   draw: 'tools.draw',
   eraser: 'tools.eraser',
   color_picker: 'tools.color_picker',

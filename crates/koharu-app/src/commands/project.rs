@@ -4,11 +4,12 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use koharu_desktop::Frame;
 use koharu_scene::{
-    AssetInput, AssetMetadata, AssetRole, At, Authored, Commit, EntityId, EntityOrigin,
-    Geometry as SceneGeometry, Group as SceneGroup, Origin, PageDraft, Point as ScenePoint,
-    Presents, RasterLayer as SceneRasterLayer, RasterLayerKind, Region as SceneRegion,
-    RemovePolicy, Revision, Session, Snapshot, SourceText as SceneSourceText,
-    TextGroup as SceneTextGroup, TextLayout as SceneTextLayout, TextLayoutKind,
+    AssetInput, AssetMetadata, AssetRole, At, Authored, BubbleRegion, Commit, EntityId,
+    EntityOrigin, FitsTo, FlowsIn, Geometry as SceneGeometry, Group as SceneGroup, Inside, Origin,
+    PageDraft, Point as ScenePoint, Presents, RasterLayer as SceneRasterLayer, RasterLayerKind,
+    RecognizedFrom, Region as SceneRegion, RegionSpec as _, RemovePolicy, Revision, Session,
+    Snapshot, SourceText as SceneSourceText, TextGroup as SceneTextGroup,
+    TextLayout as SceneTextLayout, TextLayoutKind, TextRegion, TextRole as SceneTextRole,
     Translation as SceneTranslation, Typography as SceneTypography, Visibility as SceneVisibility,
 };
 use serde::Serialize;
@@ -412,6 +413,145 @@ impl Project {
         frame: Frame,
     ) -> Result<(Commit, EntityId)> {
         self.add_text(page, frame, TextLayoutKind::Paragraph).await
+    }
+
+    /// Marks a user-drawn rectangle as source text that detection missed.
+    ///
+    /// The region is built the way detection builds one (analysis region, text
+    /// content recognized from it, and a text layer that fits it or flows in the
+    /// speech bubble containing it), but owned by the user so a later detection
+    /// pass keeps it. The content has no source text yet, so OCR fills it.
+    pub(crate) async fn add_text_region(
+        &mut self,
+        page: EntityId,
+        frame: Frame,
+    ) -> Result<(Commit, EntityId)> {
+        let snapshot = self.snapshot();
+        let value = snapshot.page(page)?.page()?;
+        // Clip the drawn rectangle to the page so OCR reads and the text fits
+        // only what is actually on the page.
+        let left = f64::from(frame.x).max(0.0);
+        let top = f64::from(frame.y).max(0.0);
+        let right = f64::from(frame.x + frame.width).min(value.width);
+        let bottom = f64::from(frame.y + frame.height).min(value.height);
+        if !(right > left && bottom > top) {
+            bail!("text region must overlap the page");
+        }
+        let geometry = Self::geometry_from_frame(Frame {
+            x: left as f32,
+            y: top as f32,
+            width: (right - left) as f32,
+            height: (bottom - top) as f32,
+            angle_degrees: 0.0,
+        })?;
+        let bubble = Self::containing_bubble(&snapshot, page, (left, top, right, bottom))?;
+        let mut layer = None;
+        let patch = snapshot.patch(|edit| {
+            let region = edit.add_analysis_region::<TextRegion>(
+                page,
+                At::End,
+                &geometry,
+                Some("text".to_owned()),
+            )?;
+            let content = edit.add_text_content(page, At::End)?;
+            let added_layer = edit.add_text_layer(
+                page,
+                At::End,
+                content,
+                &SceneTextLayout {
+                    origin: Origin::User,
+                    kind: TextLayoutKind::Paragraph,
+                    angle_degrees: None,
+                },
+            )?;
+            layer = Some(added_layer);
+            edit.set(
+                added_layer,
+                &SceneTypography {
+                    origin: Origin::User,
+                    preferred_font: None,
+                    font_weight: None,
+                    font_style: None,
+                    size: None,
+                    auto_fit: true,
+                    color: None,
+                    stroke_color: None,
+                    stroke_width: None,
+                    alignment: None,
+                    writing_mode: None,
+                    extensions: Default::default(),
+                },
+            )?;
+            edit.relate::<RecognizedFrom>(content, region)?;
+            let role = if let Some(bubble) = bubble {
+                edit.relate::<Inside>(region, bubble)?;
+                edit.relate::<FlowsIn>(added_layer, bubble)?;
+                "dev.koharu.text.dialogue"
+            } else {
+                edit.relate::<FitsTo>(added_layer, region)?;
+                "dev.koharu.text.free-text"
+            };
+            edit.set(
+                content,
+                &SceneTextRole {
+                    origin: Origin::User,
+                    role: role.to_owned(),
+                },
+            )?;
+            Ok(())
+        })?;
+        Ok((
+            self.commit(patch).await?,
+            layer.expect("text layer was added while building the patch"),
+        ))
+    }
+
+    /// The smallest detected speech bubble whose bounds hold the center of `bounds`.
+    fn containing_bubble(
+        snapshot: &Snapshot,
+        page: EntityId,
+        (min_x, min_y, max_x, max_y): (f64, f64, f64, f64),
+    ) -> Result<Option<EntityId>> {
+        let center = ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+        let mut best: Option<(f64, EntityId)> = None;
+        for entity in snapshot.descendants(page)? {
+            let id = entity.id();
+            let is_bubble = snapshot
+                .component::<SceneRegion>(id)?
+                .is_some_and(|region| region.kind == BubbleRegion::kind());
+            if !is_bubble {
+                continue;
+            }
+            let Some(geometry) = snapshot.component::<SceneGeometry>(id)? else {
+                continue;
+            };
+            let Some((left, top, right, bottom)) = Self::extents(&geometry) else {
+                continue;
+            };
+            if center.0 < left || center.0 > right || center.1 < top || center.1 > bottom {
+                continue;
+            }
+            let area = (right - left) * (bottom - top);
+            if best.is_none_or(|(smallest, _)| area < smallest) {
+                best = Some((area, id));
+            }
+        }
+        Ok(best.map(|(_, id)| id))
+    }
+
+    fn extents(geometry: &SceneGeometry) -> Option<(f64, f64, f64, f64)> {
+        let first = geometry.points.first()?;
+        Some(geometry.points.iter().fold(
+            (first.x, first.y, first.x, first.y),
+            |(min_x, min_y, max_x, max_y), point| {
+                (
+                    min_x.min(point.x),
+                    min_y.min(point.y),
+                    max_x.max(point.x),
+                    max_y.max(point.y),
+                )
+            },
+        ))
     }
 
     async fn add_text(
@@ -1332,7 +1472,7 @@ fn rasterize_stroke(
 
 #[cfg(test)]
 mod tests {
-    use koharu_scene::{Generation, ProducerId, WritingMode};
+    use koharu_scene::{Generation, ProducerId, RelationSpec, WritingMode};
 
     use super::*;
 
@@ -1364,6 +1504,90 @@ mod tests {
             Project::typography_view(typography).writing_mode,
             Some(WritingMode::Vertical)
         );
+    }
+
+    #[tokio::test]
+    async fn manual_text_region_is_ready_for_ocr_and_follows_its_bubble() {
+        let mut session = Session::memory().await.unwrap();
+        let mut setup = session.snapshot().edit();
+        let page = setup
+            .add_page(PageDraft::new("page", 100.0, 100.0), At::End)
+            .unwrap();
+        let bubble = setup
+            .add_analysis_region::<BubbleRegion>(
+                page,
+                At::End,
+                &SceneGeometry {
+                    origin: Origin::User,
+                    points: vec![
+                        ScenePoint { x: 10.0, y: 10.0 },
+                        ScenePoint { x: 60.0, y: 10.0 },
+                        ScenePoint { x: 60.0, y: 60.0 },
+                        ScenePoint { x: 10.0, y: 60.0 },
+                    ],
+                },
+                None,
+            )
+            .unwrap();
+        session.commit(setup.finish().unwrap()).await.unwrap();
+        let mut project = Project::new(session, "test".to_owned());
+        let frame = |x: f32, y: f32, width: f32, height: f32| Frame {
+            x,
+            y,
+            width,
+            height,
+            angle_degrees: 0.0,
+        };
+
+        fn target<R: RelationSpec>(snapshot: &Snapshot, source: EntityId) -> Option<EntityId> {
+            snapshot
+                .relations_from_as::<R>(source)
+                .next()
+                .map(|relation| relation.value().target)
+        }
+
+        // Inside the bubble: flows in the bubble, and OCR has something to fill.
+        let (_, layer) = project
+            .add_text_region(page, frame(20.0, 20.0, 20.0, 20.0))
+            .await
+            .unwrap();
+        let snapshot = project.snapshot();
+        let content = snapshot.text_layer(layer).unwrap().content().unwrap();
+        assert!(content.source().unwrap().is_none());
+        let region = target::<RecognizedFrom>(&snapshot, content.id()).unwrap();
+        let value = snapshot.component::<SceneRegion>(region).unwrap().unwrap();
+        assert_eq!(value.kind, TextRegion::kind());
+        assert_eq!(value.origin, Origin::User);
+        assert_eq!(target::<FlowsIn>(&snapshot, layer), Some(bubble));
+        assert_eq!(target::<Inside>(&snapshot, region), Some(bubble));
+
+        // Hanging off the page: clipped to the page and fitted to its own region.
+        let (_, layer) = project
+            .add_text_region(page, frame(80.0, 80.0, 40.0, 40.0))
+            .await
+            .unwrap();
+        let snapshot = project.snapshot();
+        let content = snapshot.text_layer(layer).unwrap().content().unwrap();
+        let region = target::<RecognizedFrom>(&snapshot, content.id()).unwrap();
+        assert_eq!(target::<FitsTo>(&snapshot, layer), Some(region));
+        let geometry = snapshot
+            .component::<SceneGeometry>(region)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Project::extents(&geometry),
+            Some((80.0, 80.0, 100.0, 100.0))
+        );
+
+        // Entirely off the page: rejected without changing the project.
+        let revision = project.revision();
+        assert!(
+            project
+                .add_text_region(page, frame(150.0, 150.0, 10.0, 10.0))
+                .await
+                .is_err()
+        );
+        assert_eq!(project.revision(), revision);
     }
 
     #[tokio::test]
