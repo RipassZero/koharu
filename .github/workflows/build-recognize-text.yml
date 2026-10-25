@@ -1,0 +1,38 @@
+name: Build Windows (Recognize text)
+
+# Builds the Windows app from this branch so it can be downloaded from the
+# run's Artifacts section. Runs on every push to the branch, or by hand.
+on:
+  push:
+    branches: ['recognize-text']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: windows-latest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: koharu-recognize-text-windows
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: windows-bun-${{ hashFiles('**/bun.lock') }}
+      - run: bun install
+      - run: bun run build
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Koharu-Recognize-Text-Windows
+          path: |
+            target/release/koharu*
+          retention-days: 30
