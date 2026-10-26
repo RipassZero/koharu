@@ -28,11 +28,18 @@ jobs:
           path: ~/.bun/install/cache
           key: windows-bun-${{ hashFiles('**/bun.lock') }}
       - run: bun install
-      - run: bun run build
+      # Bundle an installer like the official release does, so the browser
+      # engine (libcef.dll and friends) ships with the app. The official
+      # signing and updater keys are not available in a fork, so both are off.
+      - name: Build installer
+        shell: bash
+        run: >-
+          cargo tauri build --bundles nsis
+          --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"signCommand":null}}}'
       - name: Upload Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: Koharu-Recognize-Text-Windows
-          path: |
-            target/release/koharu*
+          name: Koharu-Recognize-Text-Windows-Installer
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
           retention-days: 30
