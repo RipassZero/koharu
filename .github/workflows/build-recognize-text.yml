@@ -1,14 +1,15 @@
 name: Build Windows (Recognize text)
 
-# Builds the Windows app from this branch so it can be downloaded from the
-# run's Artifacts section. Runs on every push to the branch, or by hand.
+# Builds the Windows app from main and publishes it as a Release, so the
+# latest build is always downloadable from the repository's Releases page.
+# Runs on every push to main, or by hand from the Actions tab.
 on:
   push:
-    branches: ['recognize-text']
+    branches: ['main']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,11 +44,18 @@ jobs:
           cp -r locales "../../$out/"
           cd ../..
           test -f "$out/libcef.dll"
-          echo "::notice title=portable app::$(ls "$out" | tr '\n' ' ')"
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: Koharu-Recognize-Text-Windows
-          path: Koharu Recognize Text
-          if-no-files-found: error
-          retention-days: 30
+          7z a -tzip Koharu-Recognize-Text-Windows.zip "$out" > /dev/null
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="build-${{ github.run_number }}"
+          gh release create "$tag" Koharu-Recognize-Text-Windows.zip \
+            --target "${{ github.sha }}" \
+            --title "Koharu Recognize Text (build ${{ github.run_number }})" \
+            --latest \
+            --notes "Windows build of commit ${{ github.sha }}.
+
+          Download **Koharu-Recognize-Text-Windows.zip**, extract the whole folder, and run \`koharu.exe\` inside it. Keep every file together; the app needs the files next to it to start."
