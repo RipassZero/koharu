@@ -33,9 +33,24 @@ jobs:
       # signing and updater keys are not available in a fork, so both are off.
       - name: Build installer
         shell: bash
-        run: >-
-          cargo tauri build --bundles nsis
-          --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"signCommand":null}}}'
+        run: |
+          set -o pipefail
+          cargo tauri build --bundles nsis \
+            --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"signCommand":null}}}' \
+            2>&1 | tee build.log
+      # Surface the end of the build output as annotations, which can be read
+      # through the API even when the full log download is unavailable.
+      - name: Report build output
+        if: always()
+        shell: bash
+        run: |
+          echo "::notice title=release folder::$(ls target/release 2>&1 | tr '\n' ' ')"
+          echo "::notice title=bundle folder::$(ls -R target/release/bundle 2>&1 | tr '\n' ' ' | cut -c1-900)"
+          grep -v '^\s*Compiling ' build.log | tail -n 60 | tr -d '\r' | sed 's/%/%25/g' > tail.log
+          for part in 1 2 3 4 5 6; do
+            chunk=$(sed -n "$(( (part-1)*10+1 )),$(( part*10 ))p" tail.log | awk 'BEGIN{ORS="%0A"} {print}')
+            [ -n "$chunk" ] && echo "::warning title=build output $part::$chunk"
+          done
       - name: Upload Artifact
         uses: actions/upload-artifact@v7
         with:
