@@ -506,6 +506,19 @@ impl Project {
         ))
     }
 
+    /// The page-space extents of the source region a text layer was recognized from.
+    pub(crate) fn text_region_extents(
+        snapshot: &Snapshot,
+        layer: EntityId,
+    ) -> Result<(f64, f64, f64, f64)> {
+        let region = snapshot
+            .text_layer(layer)?
+            .content()?
+            .source_region()?
+            .context("the text layer has no source region")?;
+        Self::extents(&region.geometry()?).context("the source region has no geometry")
+    }
+
     /// The smallest detected speech bubble whose bounds hold the center of `bounds`.
     fn containing_bubble(
         snapshot: &Snapshot,

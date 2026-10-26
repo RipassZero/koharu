@@ -537,11 +537,7 @@ export function CanvasWorkspace() {
         .then(async (result) => {
           selectLayers([result.layer])
           await refresh(projectKey, pagesKey, pageKey)
-          return call(
-            commands.process,
-            { scope: 'entities', value: [result.layer] },
-            { operation: 'stages', stages: ['ocr', 'translation'] },
-          )
+          return call(commands.recognizeText, result.layer)
         })
         .catch(() => undefined)
     } else if (current.kind === 'text') {

@@ -395,6 +395,105 @@ pub(crate) async fn commit_inpaint(
     ))
 }
 
+/// Reads and translates a text region drawn with the Recognize text tool,
+/// then cleans the original lettering inside it, all as one job.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn recognize_text(
+    layer: EntityId,
+    handle: AppHandle<CefRuntime>,
+    project: State<'_, CurrentProject>,
+) -> Result<JobId, Error> {
+    let (page, width, height, extents) = {
+        let project = project.project.lock().await;
+        let project = project.as_ref().context("no project is open")?;
+        let snapshot = project.snapshot();
+        let page = project
+            .active_page()
+            .context("the project has no active page")?;
+        let page_value = snapshot.page(page)?.page()?;
+        (
+            page,
+            page_value.width.round() as u32,
+            page_value.height.round() as u32,
+            Project::text_region_extents(&snapshot, layer)?,
+        )
+    };
+    let (png, bounds) =
+        tokio_rayon::spawn(move || encode_rectangle_mask(width, height, extents)).await?;
+    processing::start_job(
+        handle.clone(),
+        vec![
+            processing::Pass {
+                scope: koharu_pipeline::Scope::Entities(vec![layer]),
+                operation: koharu_pipeline::Operation::Stages {
+                    stages: vec![
+                        koharu_pipeline::Stage::Ocr,
+                        koharu_pipeline::Stage::Translation,
+                    ],
+                },
+                inpainting_mask: None,
+            },
+            processing::Pass {
+                scope: koharu_pipeline::Scope::Region { page, bounds },
+                operation: koharu_pipeline::Operation::Only {
+                    stage: koharu_pipeline::Stage::Inpainting,
+                },
+                inpainting_mask: Some(koharu_pipeline::InpaintingMask {
+                    page,
+                    png: Arc::from(png),
+                }),
+            },
+        ],
+        handle.state::<CurrentProject>(),
+        handle.state::<Processing>(),
+        handle.state::<JobChannel>(),
+    )
+    .await
+}
+
+/// A cleanup mask covering a drawn text box, grown slightly so the edges of
+/// the lettering are removed too.
+fn encode_rectangle_mask(
+    width: u32,
+    height: u32,
+    (min_x, min_y, max_x, max_y): (f64, f64, f64, f64),
+) -> anyhow::Result<(Vec<u8>, koharu_pipeline::Bounds)> {
+    if width == 0 || height == 0 {
+        bail!("page dimensions must be positive");
+    }
+    let margin = (f64::from(width.max(height)) / 1024.0 * 4.0).max(2.0);
+    let left = (min_x - margin).floor().max(0.0) as u32;
+    let top = (min_y - margin).floor().max(0.0) as u32;
+    let right = ((max_x + margin).ceil().max(0.0) as u32).min(width);
+    let bottom = ((max_y + margin).ceil().max(0.0) as u32).min(height);
+    if right <= left || bottom <= top {
+        bail!("text region does not intersect the page");
+    }
+    let mut image = GrayImage::new(width, height);
+    for y in top..bottom {
+        for x in left..right {
+            image.put_pixel(x, y, image::Luma([u8::MAX]));
+        }
+    }
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png).write_image(
+        image.as_raw(),
+        width,
+        height,
+        image::ExtendedColorType::L8,
+    )?;
+    Ok((
+        png,
+        koharu_pipeline::Bounds {
+            x: f64::from(left),
+            y: f64::from(top),
+            width: f64::from(right - left),
+            height: f64::from(bottom - top),
+        },
+    ))
+}
+
 fn ensure_revision(actual: Revision, expected: Revision) -> anyhow::Result<()> {
     if actual != expected {
         bail!("canvas edit expected revision {expected}, but the project is at {actual}");
