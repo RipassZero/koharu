@@ -445,6 +445,7 @@ impl Project {
             angle_degrees: 0.0,
         })?;
         let bubble = Self::containing_bubble(&snapshot, page, (left, top, right, bottom))?;
+        let style = Self::drawn_text_style(&snapshot, page, (left, top, right, bottom)).await;
         let mut layer = None;
         let patch = snapshot.patch(|edit| {
             let region = edit.add_analysis_region::<TextRegion>(
@@ -474,10 +475,12 @@ impl Project {
                     font_style: None,
                     size: None,
                     auto_fit: true,
-                    color: None,
-                    stroke_color: None,
-                    stroke_width: None,
+                    color: style.map(|style| opaque(style.color)),
+                    stroke_color: style.and_then(|style| style.stroke_color).map(opaque),
+                    stroke_width: style.and_then(|style| style.stroke_width),
                     alignment: None,
+                    // Left unset so the renderer picks the direction for the
+                    // translated text, as it does for detected text.
                     writing_mode: None,
                     extensions: Default::default(),
                 },
@@ -517,6 +520,39 @@ impl Project {
             .source_region()?
             .context("the text layer has no source region")?;
         Self::extents(&region.geometry()?).context("the source region has no geometry")
+    }
+
+    /// The lettering style under a drawn box, estimated from the page's
+    /// original image. A box whose style cannot be estimated keeps the defaults.
+    async fn drawn_text_style(
+        snapshot: &Snapshot,
+        page: EntityId,
+        bounds: (f64, f64, f64, f64),
+    ) -> Option<koharu_pipeline::InferredTypography> {
+        match Self::estimate_drawn_text_style(snapshot, page, bounds).await {
+            Ok(style) => style,
+            Err(error) => {
+                tracing::warn!(%error, "could not estimate the style of a drawn text region");
+                None
+            }
+        }
+    }
+
+    async fn estimate_drawn_text_style(
+        snapshot: &Snapshot,
+        page: EntityId,
+        (left, top, right, bottom): (f64, f64, f64, f64),
+    ) -> Result<Option<koharu_pipeline::InferredTypography>> {
+        let Some(asset) = snapshot.asset(page, &AssetRole::new("source")?)? else {
+            return Ok(None);
+        };
+        let bytes = snapshot.read_blob(asset.blob).await?;
+        let bounds = [left as f32, top as f32, right as f32, bottom as f32];
+        tokio_rayon::spawn(move || -> Result<_> {
+            let image = image::load_from_memory(&bytes)?;
+            Ok(koharu_pipeline::infer_text_style(&image, bounds))
+        })
+        .await
     }
 
     /// The smallest detected speech bubble whose bounds hold the center of `bounds`.
@@ -1481,6 +1517,10 @@ fn rasterize_stroke(
             }
         }
     }
+}
+
+fn opaque([red, green, blue]: [u8; 3]) -> [u8; 4] {
+    [red, green, blue, u8::MAX]
 }
 
 #[cfg(test)]

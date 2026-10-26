@@ -479,13 +479,94 @@ fn write_text_role(
     Ok(())
 }
 
+/// Lettering style estimated from the page image.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct InferredTypography {
-    color: [u8; 3],
-    stroke_color: Option<[u8; 3]>,
-    stroke_width: Option<f32>,
-    angle_degrees: f32,
-    writing_mode: WritingMode,
+pub struct InferredTypography {
+    pub color: [u8; 3],
+    pub stroke_color: Option<[u8; 3]>,
+    pub stroke_width: Option<f32>,
+    pub angle_degrees: f32,
+    pub writing_mode: WritingMode,
+}
+
+/// A pixel counts as lettering in a drawn box when it differs this much
+/// (per-channel RMS) from the colors along the box edge.
+const DRAWN_BOX_INK_DISTANCE: u32 = 48;
+
+/// Estimates the lettering style inside a user-drawn box the way detection
+/// styles the text it finds. A drawn box has no segmentation mask, so pixels
+/// that stand out from the colors along the box edge stand in for one.
+pub fn infer_text_style(
+    image: &DynamicImage,
+    [left, top, right, bottom]: [f32; 4],
+) -> Option<InferredTypography> {
+    let [window_left, window_top, window_right, window_bottom] = mask_window(
+        [
+            left - TYPOGRAPHY_SAMPLE_MARGIN,
+            top - TYPOGRAPHY_SAMPLE_MARGIN,
+            right + TYPOGRAPHY_SAMPLE_MARGIN,
+            bottom + TYPOGRAPHY_SAMPLE_MARGIN,
+        ],
+        image.width(),
+        image.height(),
+    )?;
+    let crop = image
+        .crop_imm(
+            window_left,
+            window_top,
+            window_right - window_left,
+            window_bottom - window_top,
+        )
+        .to_rgb8();
+    let (width, height) = crop.dimensions();
+    let bbox = [
+        left - window_left as f32,
+        top - window_top as f32,
+        right - window_left as f32,
+        bottom - window_top as f32,
+    ];
+    let [box_left, box_top, box_right, box_bottom] = mask_window(bbox, width, height)?;
+    let edge = TYPOGRAPHY_SAMPLE_MARGIN.ceil() as u32;
+    let mut border = Vec::new();
+    for (x, y, pixel) in crop.enumerate_pixels() {
+        if x < box_left + edge
+            || x + edge >= box_right
+            || y < box_top + edge
+            || y + edge >= box_bottom
+        {
+            border.push(pixel.0);
+        }
+    }
+    let background = median_color(&border);
+    let threshold = DRAWN_BOX_INK_DISTANCE * DRAWN_BOX_INK_DISTANCE * 3;
+    let mut pixels = vec![0_u8; width as usize * height as usize];
+    let mut area = 0_u32;
+    for y in box_top..box_bottom {
+        for x in box_left..box_right {
+            if color_distance_squared(crop.get_pixel(x, y).0, background) > threshold {
+                pixels[y as usize * width as usize + x as usize] = u8::MAX;
+                area += 1;
+            }
+        }
+    }
+    if area < 8 {
+        return None;
+    }
+    let detection = KoharuLayoutDetection {
+        label_id: 0,
+        label: "text".to_owned(),
+        score: 1.0,
+        bbox,
+        area,
+        mask: KoharuLayoutMask {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            pixels,
+        },
+    };
+    infer_typography(&crop, &detection)
 }
 
 #[derive(Clone, Copy)]
@@ -1832,6 +1913,25 @@ fn area(bounds: [f32; 4]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drawn_box_style_matches_red_lettering_on_white() {
+        let mut image = RgbImage::from_pixel(80, 40, Rgb([255, 255, 255]));
+        for y in 14..26 {
+            for x in 10..70 {
+                if (x / 4) % 2 == 0 {
+                    image.put_pixel(x, y, Rgb([200, 20, 30]));
+                }
+            }
+        }
+        let style = super::infer_text_style(
+            &image::DynamicImage::ImageRgb8(image),
+            [6.0, 10.0, 74.0, 30.0],
+        )
+        .expect("lettering is found");
+        assert!(style.color[0] > 150 && style.color[1] < 80 && style.color[2] < 80);
+        assert_eq!(style.stroke_color, None);
+    }
+
     use image::{Rgb, RgbImage};
     use imageproc::{
         distance_transform::Norm,
